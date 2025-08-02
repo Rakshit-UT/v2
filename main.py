@@ -1,18 +1,22 @@
-
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-import requests
+from typing import List
+import requests, io, logging
 import PyPDF2
-import io
-import faiss
 import numpy as np
+
+# Attempt to import FAISS
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+
 from sentence_transformers import SentenceTransformer
 import google.generativeai as genai
-import os
+from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
-import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,7 +29,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configure CORS
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,168 +38,104 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure Google Gemini API
-GEMINI_API_KEY = "AIzaSyBwqeD-FzyCxAhlJLms4FqiZ1fl2AZiBfk"
-genai.configure(api_key=GEMINI_API_KEY)
+# Configure Google Gemini
+genai.configure(api_key="AIzaSyBwqeD-FzyCxAhlJLms4FqiZ1fl2AZiBfk")
+gemini_model = genai.GenerativeModel("gemini-pro")
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Initialize models
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-gemini_model = genai.GenerativeModel('gemini-pro')
-
-# Pydantic models for request/response
 class QueryRequest(BaseModel):
-    documents: str  # URL to PDF document
+    documents: str
     questions: List[str]
 
 class QueryResponse(BaseModel):
     answers: List[str]
 
-# Global variables for document storage and indexing
-document_chunks = []
-faiss_index = None
-chunk_embeddings = []
-
 class DocumentProcessor:
-    def __init__(self):
-        self.embedding_model = embedding_model
-
     def extract_text_from_pdf_url(self, pdf_url: str) -> str:
-        """Extract text from PDF URL"""
         try:
-            response = requests.get(pdf_url)
-            response.raise_for_status()
-
-            pdf_file = io.BytesIO(response.content)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
-
+            resp = requests.get(pdf_url)
+            resp.raise_for_status()
+            reader = PyPDF2.PdfReader(io.BytesIO(resp.content))
+            text = "".join(page.extract_text() + "\n" for page in reader.pages)
             return text
         except Exception as e:
-            logger.error(f"Error extracting PDF: {e}")
-            raise HTTPException(status_code=400, detail=f"Failed to extract PDF: {str(e)}")
+            logger.error(f"PDF extraction error: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
 
     def chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
-        """Split text into overlapping chunks"""
-        chunks = []
-        start = 0
-
+        chunks, start = [], 0
         while start < len(text):
             end = start + chunk_size
-            chunk = text[start:end]
-            chunks.append(chunk)
+            chunks.append(text[start:end])
             start = end - overlap
-
         return chunks
 
     def create_embeddings(self, chunks: List[str]) -> np.ndarray:
-        """Create embeddings for text chunks"""
-        embeddings = self.embedding_model.encode(chunks)
-        return embeddings
+        return embedding_model.encode(chunks)
 
-    def build_faiss_index(self, embeddings: np.ndarray) -> faiss.Index:
-        """Build FAISS index for similarity search"""
-        dimension = embeddings.shape[1]
-        index = faiss.IndexFlatL2(dimension)
-        index.add(embeddings.astype(np.float32))
-        return index
+    def build_index(self, embeddings: np.ndarray):
+        if FAISS_AVAILABLE:
+            dim = embeddings.shape[1]
+            idx = faiss.IndexFlatL2(dim)
+            idx.add(embeddings.astype(np.float32))
+            return idx
+        else:
+            return embeddings  # fallback store raw embeddings
 
 class QueryProcessor:
-    def __init__(self):
-        self.gemini_model = gemini_model
+    def find_relevant_chunks(self, query: str, index, chunks: List[str], k: int = 5) -> List[str]:
+        q_emb = embedding_model.encode([query])
+        if FAISS_AVAILABLE and hasattr(index, "search"):
+            dists, ids = index.search(q_emb.astype(np.float32), k)
+            return [chunks[i] for i in ids[0]]
+        else:
+            sims = cosine_similarity(q_emb, index)[0]
+            top = np.argsort(sims)[-k:][::-1]
+            return [chunks[i] for i in top]
 
-    def find_relevant_chunks(self, query: str, index: faiss.Index, chunks: List[str], k: int = 5) -> List[str]:
-        """Find most relevant chunks using FAISS"""
-        query_embedding = embedding_model.encode([query])
-
-        distances, indices = index.search(query_embedding.astype(np.float32), k)
-
-        relevant_chunks = [chunks[i] for i in indices[0]]
-        return relevant_chunks
-
-    def generate_answer(self, query: str, context_chunks: List[str]) -> str:
-        """Generate answer using Gemini LLM"""
-        context = "\n\n".join(context_chunks)
-
-        prompt = f"""
-        Based on the following context from a document, please answer the question accurately and concisely.
-
-        Context:
-        {context}
-
-        Question: {query}
-
-        Answer: Provide a clear and specific answer based only on the information in the context. If the information is not available in the context, state that clearly.
-        """
-
+    def generate_answer(self, query: str, context: List[str]) -> str:
+        prompt = (
+            "Based on the context below, answer the question. If unavailable, say so.\n\n"
+            f"Context:\n\n{chr(10).join(context)}\n\nQuestion: {query}\nAnswer:"
+        )
         try:
-            response = self.gemini_model.generate_content(prompt)
-            return response.text
+            res = gemini_model.generate_content(prompt)
+            return res.text
         except Exception as e:
-            logger.error(f"Error generating answer: {e}")
-            return f"Error generating answer: {str(e)}"
+            logger.error(f"LLM error: {e}")
+            return f"Error generating answer: {e}"
 
-# Initialize processors
-doc_processor = DocumentProcessor()
-query_processor = QueryProcessor()
+doc_proc = DocumentProcessor()
+qry_proc = QueryProcessor()
 
 @app.post("/hackrx/run", response_model=QueryResponse)
-async def process_queries(request: QueryRequest):
-    """Main endpoint for processing document queries"""
-    global document_chunks, faiss_index, chunk_embeddings
-
+async def process_queries(req: QueryRequest):
     try:
-        # Extract text from PDF
-        logger.info(f"Processing PDF from URL: {request.documents}")
-        document_text = doc_processor.extract_text_from_pdf_url(request.documents)
-
-        # Chunk the document
-        document_chunks = doc_processor.chunk_text(document_text)
-        logger.info(f"Created {len(document_chunks)} chunks")
-
-        # Create embeddings
-        chunk_embeddings = doc_processor.create_embeddings(document_chunks)
-
-        # Build FAISS index
-        faiss_index = doc_processor.build_faiss_index(chunk_embeddings)
-
-        # Process each question
+        text = doc_proc.extract_text_from_pdf_url(req.documents)
+        chunks = doc_proc.chunk_text(text)
+        embs = doc_proc.create_embeddings(chunks)
+        index = doc_proc.build_index(embs)
         answers = []
-        for question in request.questions:
-            logger.info(f"Processing question: {question}")
-
-            # Find relevant chunks
-            relevant_chunks = query_processor.find_relevant_chunks(
-                question, faiss_index, document_chunks
-            )
-
-            # Generate answer
-            answer = query_processor.generate_answer(question, relevant_chunks)
-            answers.append(answer)
-
+        for q in req.questions:
+            ctx = qry_proc.find_relevant_chunks(q, index, chunks)
+            answers.append(qry_proc.generate_answer(q, ctx))
         return QueryResponse(answers=answers)
-
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing request: {e}")
+        logger.error(f"Processing error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "message": "HackRx 6.0 LLM Query Retrieval System",
         "version": "1.0.0",
-        "endpoints": {
-            "main": "/hackrx/run",
-            "health": "/health"
-        }
+        "endpoints": {"main": "/hackrx/run", "health": "/health"}
     }
 
 if __name__ == "__main__":
