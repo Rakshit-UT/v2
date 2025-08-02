@@ -1,0 +1,155 @@
+# Create a deployment script for easy setup
+deploy_script = """#!/bin/bash
+
+# HackRx 6.0 Deployment Script
+# This script sets up and runs the LLM Query Retrieval System
+
+echo "🚀 HackRx 6.0 - LLM Query Retrieval System Deployment"
+echo "================================================="
+
+# Check if Python is installed
+if ! command -v python3 &> /dev/null; then
+    echo "❌ Python 3 is not installed. Please install Python 3.11 or higher."
+    exit 1
+fi
+
+# Check Python version
+python_version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+required_version="3.8"
+
+if ! python3 -c "import sys; exit(0 if sys.version_info >= (3, 8) else 1)"; then
+    echo "❌ Python version $python_version is too old. Please install Python 3.8 or higher."
+    exit 1
+fi
+
+echo "✅ Python version $python_version detected"
+
+# Create virtual environment if it doesn't exist
+if [ ! -d "venv" ]; then
+    echo "📦 Creating virtual environment..."
+    python3 -m venv venv
+fi
+
+# Activate virtual environment
+echo "🔄 Activating virtual environment..."
+source venv/bin/activate
+
+# Upgrade pip
+echo "⬆️ Upgrading pip..."
+pip install --upgrade pip
+
+# Install requirements
+echo "📚 Installing dependencies..."
+pip install -r requirements.txt
+
+# Check if all required files exist
+required_files=("main.py" "requirements.txt" "index.html")
+for file in "${required_files[@]}"; do
+    if [ ! -f "$file" ]; then
+        echo "❌ Required file $file not found!"
+        exit 1
+    fi
+done
+
+echo "✅ All required files found"
+
+# Start the application
+echo "🎯 Starting the application..."
+echo "📡 API will be available at: http://localhost:8000"
+echo "🌐 Web interface will be available at: http://localhost:8000"
+echo "📋 API documentation will be available at: http://localhost:8000/docs"
+echo ""
+echo "Press Ctrl+C to stop the server"
+echo ""
+
+# Run with uvicorn
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+"""
+
+# Save deployment script
+with open('deploy.sh', 'w') as f:
+    f.write(deploy_script)
+
+# Make it executable (on Unix systems)
+import os
+try:
+    os.chmod('deploy.sh', 0o755)
+    print("Deployment script created and made executable")
+except:
+    print("Deployment script created (make executable manually on Unix systems)")
+
+# Create Windows batch file
+windows_deploy = """@echo off
+echo 🚀 HackRx 6.0 - LLM Query Retrieval System Deployment
+echo =================================================
+
+REM Check if Python is installed
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo ❌ Python is not installed. Please install Python 3.8 or higher.
+    pause
+    exit /b 1
+)
+
+echo ✅ Python detected
+
+REM Create virtual environment if it doesn't exist
+if not exist "venv" (
+    echo 📦 Creating virtual environment...
+    python -m venv venv
+)
+
+REM Activate virtual environment
+echo 🔄 Activating virtual environment...
+call venv\\Scripts\\activate.bat
+
+REM Upgrade pip
+echo ⬆️ Upgrading pip...
+python -m pip install --upgrade pip
+
+REM Install requirements
+echo 📚 Installing dependencies...
+pip install -r requirements.txt
+
+REM Check if all required files exist
+if not exist "main.py" (
+    echo ❌ Required file main.py not found!
+    pause
+    exit /b 1
+)
+
+if not exist "requirements.txt" (
+    echo ❌ Required file requirements.txt not found!
+    pause
+    exit /b 1
+)
+
+if not exist "index.html" (
+    echo ❌ Required file index.html not found!
+    pause
+    exit /b 1
+)
+
+echo ✅ All required files found
+
+REM Start the application
+echo 🎯 Starting the application...
+echo 📡 API will be available at: http://localhost:8000
+echo 🌐 Web interface will be available at: http://localhost:8000
+echo 📋 API documentation will be available at: http://localhost:8000/docs
+echo.
+echo Press Ctrl+C to stop the server
+echo.
+
+REM Run with uvicorn
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+pause
+"""
+
+# Save Windows deployment script
+with open('deploy.bat', 'w') as f:
+    f.write(windows_deploy)
+
+print("Windows deployment script created (deploy.bat)")
+print("Total deployment files created: 2")
